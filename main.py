@@ -5,14 +5,26 @@ import time
 from engine.runner import BenchmarkRunner
 from agent.main_agent import MainAgent
 
+from engine.retrieval_eval import RetrievalEvaluator
+
 # Giả lập các components Expert
 class ExpertEvaluator:
+    def __init__(self):
+        self.retrieval_eval = RetrievalEvaluator()
+
     async def score(self, case, resp): 
-        # Giả lập tính toán Hit Rate và MRR
+        # Lấy retrieved_ids từ agent và expected từ test case
+        retrieved_ids = resp.get("metadata", {}).get("sources", [])
+        expected_ids = case.get("expected_retrieval_ids", [])
+        
+        # Tính toán Hit Rate và MRR thực tế
+        hit_rate = self.retrieval_eval.calculate_hit_rate(expected_ids, retrieved_ids)
+        mrr = self.retrieval_eval.calculate_mrr(expected_ids, retrieved_ids)
+        
         return {
             "faithfulness": 0.9, 
             "relevancy": 0.8,
-            "retrieval": {"hit_rate": 1.0, "mrr": 0.5}
+            "retrieval": {"hit_rate": hit_rate, "mrr": mrr}
         }
 
 class MultiModelJudge:

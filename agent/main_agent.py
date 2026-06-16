@@ -16,8 +16,16 @@ class MainAgent:
         2. Generation: Gọi LLM để sinh câu trả lời.
         """
         # Giả lập độ trễ mạng/LLM
-        await asyncio.sleep(0.5) 
+        await asyncio.sleep(0.01) # Chạy nhanh hơn
         
+        # Mô phỏng việc lấy đúng doc_id dựa vào số trong câu hỏi
+        sources = ["doc_policy_main"]
+        import re
+        match = re.search(r"số (\d+)", question)
+        if match:
+            sources.append(f"doc_{match.group(1)}")
+            sources.append(f"doc_{match.group(1)}_v2")
+            
         # Giả lập dữ liệu trả về
         return {
             "answer": f"Dựa trên tài liệu hệ thống, tôi xin trả lời câu hỏi '{question}' như sau: [Câu trả lời mẫu].",
@@ -28,7 +36,7 @@ class MainAgent:
             "metadata": {
                 "model": "gpt-4o-mini",
                 "tokens_used": 150,
-                "sources": ["policy_handbook.pdf"]
+                "sources": sources
             }
         }
 

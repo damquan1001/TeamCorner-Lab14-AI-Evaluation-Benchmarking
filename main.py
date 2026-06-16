@@ -10,6 +10,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 from agent.main_agent import MainAgent
 from engine.llm_judge import LLMJudge
+from engine.rate_limit import AsyncRateLimiter
 from engine.retrieval_eval import RetrievalEvaluator
 from engine.runner import BenchmarkRunner
 
@@ -209,6 +210,7 @@ def build_summary(agent_version: str, results):
     metrics = {
         "avg_score": sum(r["judge"]["final_score"] for r in results) / total,
         "hit_rate": sum(r["ragas"]["retrieval"]["hit_rate"] for r in results) / total,
+        "avg_mrr": sum(r["ragas"]["retrieval"].get("mrr", 0.0) for r in results) / total,
         "agreement_rate": sum(r["judge"]["agreement_rate"] for r in results) / total,
         "avg_score_gap": sum(r["judge"].get("score_gap", 0.0) for r in results) / total,
         "conflict_rate": conflict_count / total,
@@ -258,7 +260,14 @@ async def run_benchmark_with_results(agent_version: str):
         print("data/golden_set.jsonl is empty. Create at least one test case.")
         return None, None
 
-    runner = BenchmarkRunner(MainAgent(version=agent_version), ExpertEvaluator(), LLMJudge())
+    rate_limiter = AsyncRateLimiter.from_env()
+    judge = LLMJudge(rate_limiter=rate_limiter)
+    runner = BenchmarkRunner(
+        MainAgent(version=agent_version),
+        ExpertEvaluator(),
+        judge,
+        rate_limiter=rate_limiter,
+    )
     results = await runner.run_all(dataset)
     summary = build_summary(agent_version, results)
     return results, summary
@@ -292,6 +301,7 @@ async def main():
     print(f"{'LLM Judge Avg Score':<25} | {v1_m['avg_score']:<12.2f} | {v2_m['avg_score']:<12.2f} | {gate_result['deltas']['delta_score']:+11.2f}")
     print(f"{'Consensus Pass Rate':<25} | {v1_m['consensus_pass_rate']*100:<11.1f}% | {v2_m['consensus_pass_rate']*100:<11.1f}% | {gate_result['deltas']['delta_pass_rate']*100:+10.1f}%")
     print(f"{'Retrieval Hit Rate':<25} | {v1_m['hit_rate']*100:<11.1f}% | {v2_m['hit_rate']*100:<11.1f}% | {(v2_m['hit_rate']-v1_m['hit_rate'])*100:+10.1f}%")
+    print(f"{'Retrieval Avg MRR':<25} | {v1_m.get('avg_mrr', 0.0):<12.2f} | {v2_m.get('avg_mrr', 0.0):<12.2f} | {v2_m.get('avg_mrr', 0.0)-v1_m.get('avg_mrr', 0.0):+11.2f}")
     print(f"{'Avg Latency (seconds)':<25} | {v1_m.get('avg_latency', 0.0):<12.2f} | {v2_m.get('avg_latency', 0.0):<12.2f} | {gate_result['deltas']['pct_latency_change']*100:+10.1f}%")
     print(f"{'Avg Tokens per Query':<25} | {v1_m.get('avg_tokens_used', 0.0):<12.1f} | {v2_m.get('avg_tokens_used', 0.0):<12.1f} | {gate_result['deltas']['pct_tokens_change']*100:+10.1f}%")
     print(f"{'Safety Violations':<25} | {v1_m.get('safety_violations', 0):<12} | {v2_m.get('safety_violations', 0):<12} | {v2_m.get('safety_violations', 0) - v1_m.get('safety_violations', 0):+11}")

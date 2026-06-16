@@ -10,6 +10,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 from agent.main_agent import MainAgent
 from engine.llm_judge import LLMJudge
+from engine.rate_limit import AsyncRateLimiter
 from engine.retrieval_eval import RetrievalEvaluator
 from engine.runner import BenchmarkRunner
 
@@ -259,7 +260,14 @@ async def run_benchmark_with_results(agent_version: str):
         print("data/golden_set.jsonl is empty. Create at least one test case.")
         return None, None
 
-    runner = BenchmarkRunner(MainAgent(version=agent_version), ExpertEvaluator(), LLMJudge())
+    rate_limiter = AsyncRateLimiter.from_env()
+    judge = LLMJudge(rate_limiter=rate_limiter)
+    runner = BenchmarkRunner(
+        MainAgent(version=agent_version),
+        ExpertEvaluator(),
+        judge,
+        rate_limiter=rate_limiter,
+    )
     results = await runner.run_all(dataset)
     summary = build_summary(agent_version, results)
     return results, summary

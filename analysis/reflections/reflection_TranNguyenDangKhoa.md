@@ -8,7 +8,7 @@
 ### Deliverable cá nhân & nhóm liên quan
 | Deliverable | Trách nhiệm |
 |-------------|-------------|
-| `analysis/failure_analysis.md` | Viết và điền báo cáo phân tích lỗi nhóm (Failure Clustering + 5 Whys) |
+| `analysis/failure_analysis.md` | Viết và điền báo cáo phân tích lỗi nhóm (Failure Clustering + 5 Whys + Action Plan) |
 | `analysis/reflections/reflection_TranNguyenDangKhoa.md` | Báo cáo phản tư cá nhân (file này) |
 | `reports/summary.json` | Đối chiếu số liệu, xác minh metric trước khi nộp |
 | `reports/benchmark_results.json` | Phân tích per-case để clustering lỗi |
@@ -21,14 +21,26 @@
    - **Multi-Judge & Pipeline**: `engine/llm_judge.py` (2 model), `engine/runner.py` (async), regression gate trong `main.py`
    - **Agent V1/V2**: `agent/main_agent.py` — so sánh retrieval ranking và safety handling
 
-2. **Phân tích kết quả benchmark**
-   - Đọc và phân loại 55 kết quả trong `benchmark_results.json`
-   - Xác định 6 case fail (`qa_47`–`qa_51`, `qa_53`) dù retrieval đạt 100% hit rate
-   - Rút ra insight: lỗi tập trung ở **Generation/Prompting**, không phải Retrieval
+2. **Phân tích kết quả benchmark — lần 1 (API live, 17:06:58)**
+   - Agent live qua OpenRouter; 22/55 cases V2 fail (pass rate 60%)
+   - Judge chủ yếu `api_error_fallback` do Gemini HTTP 429 (free tier 20 req/ngày)
+   - Paradox: V2 score **2.99** thấp hơn V1 **3.72** — do prompt V2 conservative + judge offline heuristic
+   - Rút ra insight: retrieval 100% hit; lỗi ở **generation prompt tuning** và **judge quota**
+   - Release Gate: **ROLLBACK**
 
-3. **Chuẩn bị nộp bài**
-   - Đối chiếu output với checklist README (`check_lab.py`: `hit_rate`, `agreement_rate`, regression)
-   - Tổng hợp số liệu regression V1 → V2 cho báo cáo nhóm
+3. **Triển khai Action Plan (Phần 5) và xác minh lại — lần 2 (offline post-fix, 17:28:40)**
+   - Phối hợp bổ sung code theo root cause từ 5 Whys:
+     - `engine/http_client.py` — retry + exponential backoff cho HTTP 429
+     - `engine/rate_limit.py` + `engine/runner.py` — throttle ≤ 15 req/phút, batch 3, delay 4s
+     - `agent/main_agent.py` — tune V2 prompt (helpful khi context đủ, refuse unsafe)
+     - `engine/llm_judge.py` — judge sequential + rate limit
+   - Cập nhật `failure_analysis.md` Phần 5 (checklist 9/9 hoàn thành)
+   - Chạy lại pipeline: V2 pass **100%**, avg score **4.69**, Release Gate **RELEASE**
+   - `check_lab.py` pass với `summary.json` mới
+
+4. **Chuẩn bị nộp bài**
+   - Đối chiếu output với checklist README (`hit_rate`, `agreement_rate`, regression)
+   - Ghi rõ trong báo cáo: 2 lần chạy (API live pre-fix vs offline post-fix) và limitation còn lại
 
 ### Luồng công việc tổng kết
 
@@ -38,6 +50,8 @@ Các module (Retrieval / Judge / Runner / Agent)
 python main.py → reports/summary.json + benchmark_results.json
         ↓
 Phân tích per-case (pass/fail, retrieval vs judge score)
+        ↓
+Root cause (5 Whys) → Action Plan → fix code → chạy lại
         ↓
 analysis/failure_analysis.md (báo cáo nhóm)
         ↓
@@ -53,110 +67,143 @@ reflection_TranNguyenDangKhoa.md (báo cáo cá nhân)
 **MRR (Mean Reciprocal Rank)** đo vị trí doc đúng trong danh sách retrieve:
 - Rank 1 → MRR = 1.0; Rank 2 → MRR = 0.5; không tìm thấy → 0.0
 
-Khi tổng kết kết quả nhóm, tôi nhận thấy:
-- **V1:** Hit Rate 100%, MRR ~0.59 — doc đúng có trong top-k nhưng bị xếp sau `doc_policy_main`
-- **V2:** Hit Rate 100%, MRR 1.0 — doc liên quan được đưa lên đầu
+Kết quả cả hai lần chạy:
+- **V1 & V2:** Hit Rate 100%, MRR 1.0 — retrieval mock đồng bộ với dataset `doc_{index}`
+- **Regression delta MRR = 0** — cải thiện ranking V2 không thể hiện qua MRR (cả hai đều 1.0)
 
-**Bài học cho báo cáo:** Chỉ nhìn Hit Rate sẽ bỏ sót cải thiện ranking. Regression gate cần theo dõi **cả `hit_rate` lẫn `avg_mrr`**.
+**Bài học:** Cần dataset đa dạng hơn để MRR phân biệt V1 vs V2 ranking; retrieval metric vẫn hữu ích để loại trừ lỗi Vector DB.
 
 ### 2.2 Cohen's Kappa vs Agreement Rate
 
 Nhóm dùng **Agreement Rate** trong `LLMJudge`:
 - Hai judge cùng điểm → 1.0; lệch 1 điểm → 0.5; lệch > 1 → 0.0
 
-**Cohen's Kappa** chặt hơn vì loại trừ agreement do ngẫu nhiên — phù hợp production với ≥ 50 mẫu.
+| Lần chạy | Agreement Rate | Judge mode | Ghi chú |
+|----------|----------------|------------|---------|
+| API live pre-fix (17:06:58) | 91.3% | Hỗn hợp → offline fallback (429) | conflict_rate = 0% |
+| Offline post-fix (17:28:40) | **94.4%** | `gemini-offline`, `openrouter-offline` | score_gap avg 0.23 |
 
-Khi report, tôi ghi chú: benchmark chạy với **agreement_rate = 100%**, nhưng judge một phần dùng **heuristic fallback** (API quota 429) — cần chạy lại với API thật trước nộp để số liệu multi-judge đáng tin hơn.
+**Cohen's Kappa** vẫn nên dùng ở production để loại trừ agreement ngẫu nhiên. Với judge fallback, agreement rate phản ánh heuristic rubric hơn là LLM consensus thật — cần ghi rõ limitation trong báo cáo.
 
 ### 2.3 Position Bias
 
-Position bias: LLM Judge cho điểm khác khi đổi thứ tự trình bày answer/ground truth. Module `LLMJudge.check_position_bias()` đã có sẵn — trong vai trò reporter, tôi đề xuất nhóm chạy thử trên 10 case trước khi kết luận cuối về độ tin cậy judge.
+Position bias: LLM Judge cho điểm khác khi đổi thứ tự trình bày answer/ground truth. Module `LLMJudge.check_position_bias()` đã có sẵn — tôi đề xuất nhóm chạy thử trên 10 case trước khi kết luận cuối về độ tin cậy judge.
 
 ### 2.4 Trade-off Chi phí vs Chất lượng
 
-| Metric (V2, 55 cases) | Giá trị |
-|-----------------------|---------|
-| Total tokens | 6,360 |
-| Cost estimate | ~$0.013 |
-| Avg latency | ~0.014s/case |
-| Pass rate | ~89% |
+**Lần 1 — API live (17:06:58):**
 
-**Đề xuất giảm ~30% chi phí eval** (tổng hợp từ phân tích nhóm):
-1. Retrieval eval chạy local (miễn phí) — chỉ gọi LLM Judge khi `hit_rate = 0` hoặc `mrr < 0.5`
-2. Dùng `gpt-4o-mini` làm judge mặc định; escalate `gpt-4o` khi hai judge lệch > 1 điểm
-3. Cache kết quả judge theo hash `(question, answer, ground_truth)` khi chạy regression lặp lại
+| Metric (V2) | Giá trị |
+|-------------|---------|
+| Avg tokens/query | 155.1 |
+| Total eval cost | **$0.00155** |
+| Pass rate | **60.0%** |
+| Agent / Judge | Live / 429 fallback |
+
+**Lần 2 — offline post-fix (17:28:40):**
+
+| Metric (V2) | Giá trị |
+|-------------|---------|
+| Pass rate | **100.0%** |
+| Avg score | **4.69** |
+| Agreement rate | **94.4%** |
+| Eval cost | $0 (offline) |
+
+**Đề xuất giảm ~30% chi phí eval** (đã chuyển thành Action Plan §5.3 trong báo cáo nhóm):
+1. Retrieval eval local — chỉ gọi LLM Judge khi `hit_rate = 0` hoặc `mrr < 0.5`
+2. Single live judge khi quota hạn chế; dual-judge live khi có paid tier
+3. Cache judge theo hash `(question, answer, ground_truth)`
+4. Throttle Runner — **đã triển khai**: `BENCHMARK_MAX_RPM=15`, batch 3, judge sequential
 
 ---
 
 ## 3. Problem Solving (Giải quyết vấn đề)
 
-### Vấn đề 1: Hit Rate 100% nhưng vẫn có case fail
+### Vấn đề 1: Hit Rate 100% nhưng Pass Rate chỉ 60% (API live)
 
-**Triệu chứng:** 55/55 cases `hit_rate = 1.0`, nhưng `pass_rate` chỉ ~89% (6 fail).
+**Triệu chứng:** Retrieval hit/MRR đều 1.0, nhưng 22/55 cases V2 fail.
 
-**Cách xử lý khi tổng kết:**
-- Lọc `benchmark_results.json` theo `"status": "fail"`
-- Đối chiếu từng case fail: retrieval metric vs judge score
-- Phân loại: out-of-context (`qa_47`), conflicting info (`qa_49`), ambiguous (`qa_50`), edge case (`qa_51`), complex reasoning (`qa_53`)
+**Phân tích:**
+- Nhiều case V2 trả *"I do not know"* dù context có thông tin (ví dụ `qa_2`)
+- V2 prompt quá thận trọng; judge offline penalize câu trả lời ngắn
 
-**Kết luận đưa vào báo cáo nhóm:** Retrieval stage hoạt động tốt; **root cause nằm ở Generation** — agent trả template `[Chi tiết dựa trên ground truth]` thay vì từ chối hoặc hỏi lại.
+**Kết luận:** Lỗi không nằm ở Vector DB — nằm ở generation prompt.
 
-### Vấn đề 2: Regression — Hit Rate không đổi nhưng MRR tăng mạnh
+**Fix đã triển khai:** Tune V2 prompt + context enrichment (policy snippets theo keyword) trong `agent/main_agent.py`.
 
-**Triệu chứng:** `delta_hit_rate = 0.0`, `delta_mrr = +0.41`, `delta_score = +0.82`.
+### Vấn đề 2: Paradox V2 thấp hơn V1 khi chạy API live
 
-**Giải pháp phân tích:**
-- Giải thích cho nhóm: V2 cải thiện **thứ tự ranking**, không phải **khả năng tìm doc**
-- Đề xuất regression gate trong `main.py` đã đúng hướng khi track cả MRR
+**Triệu chứng:** API live: V2 **-0.73** score (3.72 → 2.99).
 
-### Vấn đề 3: API quota — judge fallback ảnh hưởng báo cáo
+**Giải thích:** V1 prompt đơn giản → câu trả lời tự tin hơn → judge heuristic cho điểm cao; V2 conservative bị penalize.
 
-**Triệu chứng:** Nhiều case trong `benchmark_results.json` ghi `API fallback: insufficient_quota`.
+**Sau fix (offline):** V2 pass **100%**, delta score **+2.41** — paradox được giải quyết khi cân bằng helpfulness và safety.
 
-**Cách xử lý:**
-- Ghi rõ trong báo cáo limitation của lần chạy hiện tại
-- Heuristic judge vẫn phân loại được pass/fail cơ bản (safety pass, template fail)
-- Khuyến nghị nhóm nạp quota và chạy lại `python main.py` trước nộp chính thức
+### Vấn đề 3: Gemini Judge HTTP 429
+
+**Triệu chứng:** Quota free tier 20 req/ngày; ~110 judge calls vượt limit.
+
+**Fix đã triển khai:**
+- `post_json_with_retry` — exponential backoff trên 429/5xx
+- `AsyncRateLimiter` 15 RPM + batch nhỏ + judge sequential
+- Cấu hình trong `.env.example`: `BENCHMARK_MAX_RPM`, `JUDGE_MAX_RETRIES`, `JUDGE_CALLS_SEQUENTIAL`
+
+**Limitation còn lại:** Chưa có số liệu API live post-fix (quota chưa reset). Cần chạy lại `python main.py` khi API available.
 
 ### Vấn đề 4: Điều phối input từ nhiều thành viên
 
-**Khó khăn:** Metric nằm rải rác ở nhiều module, format khác nhau.
-
 **Giải pháp:**
-- Dùng `reports/summary.json` làm **single source of truth** cho số tổng hợp
-- Dùng `benchmark_results.json` cho phân tích chi tiết per-case
-- Map từng metric về module và người phụ trách trong báo cáo nhóm
+- `reports/summary.json` làm **single source of truth**
+- `benchmark_results.json` cho phân tích per-case
+- Map metric → module → người phụ trách trong `failure_analysis.md`
 
 ---
 
 ## 4. Kết quả & Bài học
 
-### Số liệu tổng hợp (Agent V2, từ `summary.json`)
+### Số liệu tổng hợp — lần 1 (API live, 17:06:58)
 
-| Metric | Giá trị |
-|--------|---------|
-| Tổng cases | 55 |
-| Avg score | 3.80 / 5.0 |
-| Hit rate | 100% |
-| Avg MRR | 1.00 |
-| Agreement rate | 100% |
-| Pass rate | ~89% (49/6) |
-| Regression | V1 → V2: **APPROVE** (+0.82 score, +0.41 MRR) |
+| Metric | V1 (Base) | V2 (Optimized) |
+|--------|-----------|----------------|
+| Tổng cases | 55 | 55 |
+| Avg score | **3.72** | **2.99** |
+| Pass rate | **67.3%** | **60.0%** |
+| Hit Rate / MRR | 100% / 1.00 | 100% / 1.00 |
+| Agreement rate | — | **91.3%** |
+| Safety violations | 0 | 0 |
+| Eval cost (V2) | — | **$0.00155** |
+| Release Gate | — | **ROLLBACK** |
 
-### Phân bổ lỗi (tóm tắt cho failure_analysis)
+### Số liệu tổng hợp — lần 2 (offline post-fix, 17:28:40)
 
-| Nhóm lỗi | Số lượng | Giai đoạn hệ thống |
-|----------|----------|-------------------|
-| Template / Incomplete answer | 4 | Generation |
-| Out-of-context (không từ chối) | 1 | Generation |
-| Conflicting info | 1 | Generation / Prompting |
-| Hallucination do retrieval sai | 0 | — |
+| Metric | V1 (Base) | V2 (Optimized) |
+|--------|-----------|----------------|
+| Tổng cases | 55 | 55 |
+| Avg score | **2.28** | **4.69** |
+| Pass rate | 20.0% | **100.0%** |
+| Hit Rate / MRR | 100% / 1.00 | 100% / 1.00 |
+| Agreement rate | — | **94.4%** |
+| Safety violations | 0 | 0 |
+| Release Gate | — | **RELEASE** (delta +2.41) |
+
+> **Lưu ý khi nộp:** `reports/summary.json` hiện phản ánh **lần 2 (post-fix)**. Báo cáo nhóm §1 vẫn giữ số API live lần 1 để phân tích paradox; §5 và §6 ghi cả hai lần chạy.
+
+### Công việc tổng kết đã hoàn thành
+
+- [x] Merge code từ nhánh `ntddatj` (agent, judge, regression gate, tests)
+- [x] Chạy pipeline API live lần 1: `main.py` → `check_lab.py` (pass)
+- [x] Cập nhật `failure_analysis.md` — clustering, 5 Whys, paradox, limitation 429
+- [x] Hoàn thiện **Phần 5 Action Plan** — triển khai code + checklist 9/9
+- [x] Chạy lại benchmark post-fix → V2 pass 100%, gate RELEASE
+- [x] Cập nhật `reports/summary.json` và reflection cá nhân
 
 ### Điều tôi làm khác nếu làm lại
+
 1. Tạo template thu thập input sớm hơn (Google Form / Notion) để mỗi thành viên điền metric + insight trước deadline
-2. Viết script Python nhỏ tự động cluster fail cases từ `benchmark_results.json` thay vì lọc thủ công
-3. Chạy `check_lab.py` ngay sau mỗi lần `main.py` để tránh sửa report khi format JSON thay đổi
+2. Viết script Python tự động cluster fail cases từ `benchmark_results.json` thay vì lọc thủ công
+3. Chạy `check_lab.py` ngay sau mỗi lần `main.py` và ghi timestamp rõ trong báo cáo
+4. Triển khai rate limit + retry **trước** lần benchmark API live đầu tiên để tránh 429 làm méo kết quả
 
 ### Tóm tắt
 
-Vai trò Analyst/Reporter giúp nhóm biến output kỹ thuật rời rạc thành **câu chuyện có số liệu**: retrieval tốt, V2 cải thiện ranking và score, nhưng generation vẫn là điểm yếu cần tối ưu tiếp theo. Việc tách metric retrieval khỏi judge score là insight quan trọng nhất tôi truyền đạt qua báo cáo nhóm.
+Vai trò Analyst/Reporter: tổng hợp hai vòng benchmark cho thấy **retrieval ổn định 100%** xuyên suốt. Lần API live đầu (**ROLLBACK**, V2 pass 60%) chứng minh auto-gate hoạt động và phát hiện paradox V2 < V1. Sau khi triển khai Action Plan (retry, rate limit, tune prompt), lần post-fix đạt **RELEASE** (V2 pass 100%, score 4.69). Bài học lớn nhất: **báo cáo eval phải ghi rõ limitation judge/quota** và **tách metric retrieval vs generation** trước khi kết luận release.
